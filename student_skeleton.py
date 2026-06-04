@@ -29,7 +29,6 @@ def detect_monitor(image):
 
     contours, _ = cv2.findContours(edges_dilated, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 면적 필터링: 모니터가 화면의 5% ~ 75%를 차지한다고 가정
     area_filtered = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -52,7 +51,6 @@ def detect_monitor(image):
         if approx is None:
             continue
 
-        # 모니터 베젤(검은 테두리) 검증
         border_pts = approx.reshape(4, 2).astype(float)
         t = np.linspace(0, 1, 15)
         all_samples = []
@@ -67,7 +65,6 @@ def detect_monitor(image):
 
         valid_candidates.append((area, approx))
 
-    # 예외 처리: 테두리 검증을 통과 못 한 경우 색상 상관없이 가장 큰 4각형 반환
     if not valid_candidates:
         for area, cnt in top_contours:
             peri = cv2.arcLength(cnt, True)
@@ -80,12 +77,10 @@ def detect_monitor(image):
     if not valid_candidates:
         return None, None, None, None
 
-    # 가장 큰 사각형 영역 선택
     best_rect = max(valid_candidates, key=lambda item: item[0])[1]
     pts = best_rect.reshape(4, 2).astype("float32")
     rect = np.zeros((4, 2), dtype="float32")
 
-    # 좌표 정렬 (좌상, 우상, 우하, 좌하)
     s = pts.sum(axis=1)
     rect[0] = pts[np.argmin(s)]
     rect[2] = pts[np.argmax(s)]
@@ -108,7 +103,6 @@ def rectify_monitor(image, top_left, top_right, bottom_right, bottom_left):
     width_bottom = np.linalg.norm(bottom_right - bottom_left)
     max_width = int(max(width_top, width_bottom))
 
-    # 16:9 비율 강제 고정
     max_height = int(max_width * 9 / 16)
 
     src = np.array([top_left, top_right, bottom_right, bottom_left], dtype="float32")
@@ -125,45 +119,34 @@ def detect_line(rectified):
     LSD(Line Segment Detector) 기반 버전
     가장 긴 선분 하나를 반환
     """
-
     if rectified is None:
         return None
 
     gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
-
-    # 약한 노이즈 제거
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    # LSD 생성
     lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
-
     result = lsd.detect(gray)
 
     if result is None or result[0] is None:
         return None
 
     lines = result[0]
-
     max_length = 0
     best_line = None
 
     for line in lines:
         x1, y1, x2, y2 = line[0]
-
         dx = x2 - x1
         dy = y2 - y1
-
         length = np.hypot(dx, dy)
 
-        # 현재 코드와 동일한 각도 체계
         angle = np.degrees(np.arctan2(dx, dy))
-
         if angle > 90:
             angle -= 180
         elif angle < -90:
             angle += 180
 
-        # 수평/수직 제거
         if abs(angle) < 2.0 or abs(angle) > 88.0:
             continue
 
@@ -189,7 +172,6 @@ def calculate_angle(line) -> Optional[float]:
     x1, y1, x2, y2 = line
     dx, dy = x2 - x1, y2 - y1
 
-    # 12시 방향 0도 기준, 시계방향(-), 반시계방향(+)
     angle = np.degrees(np.arctan2(dx, dy))
     if angle > 90:
         angle -= 180
@@ -242,32 +224,49 @@ class LineDetector(Node):
             self.get_logger().warning(f"Failed to convert image: {exc!r}")
             return
 
-        # 1. Detect monitor
+        # 1. Detect monitor.
         top_left, top_right, bottom_right, bottom_left = detect_monitor(image)
         if any(p is None for p in (top_left, top_right, bottom_right, bottom_left)):
+            angle_msg = Float32()
+            angle_msg.data = 67.0
+            self.angle_pub.publish(angle_msg)
+            self.get_logger().warning("Monitor not detected.")
             return
 
-        # 2. Rectify monitor
+        # 2. Rectify monitor.
         rectified = rectify_monitor(image, top_left, top_right, bottom_right, bottom_left)
         if rectified is None:
+            angle_msg = Float32()
+            angle_msg.data = 67.0
+            self.angle_pub.publish(angle_msg)
+            self.get_logger().warning("Monitor not rectified.")
             return
 
-        # 3. Detect line
+        # 3. Detect line.
         line = detect_line(rectified)
         if line is None:
+            angle_msg = Float32()
+            angle_msg.data = 67.0
+            self.angle_pub.publish(angle_msg)
+            self.get_logger().warning("Line not detected.")
             return
         self._debug_line(msg, rectified, line)
 
-        # 4. Calculate and publish angle
+        # 4. Calculate and publish angle.
         angle = calculate_angle(line)
         if angle is None:
+            angle_msg = Float32()
+            angle_msg.data = 67.0
+            self.angle_pub.publish(angle_msg)
+            self.get_logger().warning("Angle not calculated.")
             return
 
+        # 성공 시 실제 각도 전송
         angle_msg = Float32()
         angle_msg.data = float(angle)
         self.angle_pub.publish(angle_msg)
-        
-        self.get_logger().info(f"Detected Angle: {float(angle):.2f} deg")
+
+        self.get_logger().info(f"Line angle: {float(angle):.2f} deg")
 
     def _debug_line(self, msg, rectified, line) -> None:
         debug_line = rectified.copy()
